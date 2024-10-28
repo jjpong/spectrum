@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>光譜分析</title>
+    <style>
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        .video-container {
+            position: relative;
+            margin-bottom: 20px;
+        }
+        #video {
+            border: 2px solid #333;
+        }
+        #selectionCanvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            pointer-events: none;
+        }
+        #spectrumCanvas {
+            border: 1px solid #333;
+            margin-top: 20px;
+        }
+        .controls {
+            margin: 10px 0;
+        }
+        select, button {
+            padding: 5px;
+            margin: 5px;
+        }
+        .captured-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: flex-start;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 10px;
+        }
+        .captured-item {
+            position: relative;
+            border: 1px solid #ccc;
+            padding: 5px;
+            display: inline-block;
+        }
+        .captured-item img {
+            max-width: 320px;
+            height: auto;
+        }
+        .delete-btn {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: rgba(255, 0, 0, 0.7);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="video-container">
+            <video id="video" width="640" height="480" autoplay playsinline></video>
+            <canvas id="selectionCanvas"></canvas>
+        </div>
+        <div class="controls">
+            <select id="resolutionSelect">
+                <option value="320x240">320x240</option>
+                <option value="640x480" selected>640x480</option>
+                <option value="1280x720">1280x720</option>
+                <option value="1920x1080">1920x1080</option>
+            </select>
+            <button onclick="startCamera()">開啟攝影機</button>
+            <button id="pauseButton" onclick="toggleSpectrum()" disabled>暫停光譜</button>
+            <button id="downloadButton" onclick="downloadSpectrum()" disabled>下載光譜數據</button>
+            <button id="captureButton" onclick="captureScene()" disabled>擷取畫面</button>
+            <button id="clearCapturesButton" onclick="clearCaptures()">清除所有擷取</button>
+            <button id="downloadAllButton" onclick="downloadAllCaptures()">下載所有擷取</button>
+        </div>
+        <canvas id="spectrumCanvas"></canvas>
+        <div id="capturedContainer" class="captured-container"></div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const selectionCanvas = document.getElementById('selectionCanvas');
+        const spectrumCanvas = document.getElementById('spectrumCanvas');
+        const resolutionSelect = document.getElementById('resolutionSelect');
+        const pauseButton = document.getElementById('pauseButton');
+        const downloadButton = document.getElementById('downloadButton');
+        const captureButton = document.getElementById('captureButton');
+        const capturedContainer = document.getElementById('capturedContainer');
+        
+        let stream = null;
+        let isDrawing = false;
+        let startX = 0;
+        let startY = 0;
+        let selectionRect = null;
+        let animationFrameId = null;
+        let isSpectrumActive = false;
+        let isPaused = false;
+        let currentIntensities = null;
+        let captureCount = 0;
+
+        function setupCanvases() {
+            // 設定選擇區域的 canvas
+            selectionCanvas.width = video.videoWidth;
+            selectionCanvas.height = video.videoHeight;
+            
+            // 設定光譜 canvas
+            spectrumCanvas.width = video.videoWidth;
+            spectrumCanvas.height = 200;
+
+            // 啟用按鈕
+            pauseButton.disabled = false;
+        }
+
+        function startDrawing(e) {
+            const rect = video.getBoundingClientRect();
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+            isDrawing = true;
+
+            // 清除之前的選擇區域
+            const ctx = selectionCanvas.getContext('2d');
+            ctx.clearRect(0, 0, selectionCanvas.width, selectionCanvas.height);
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+
+            const rect = video.getBoundingClientRect();
+            const currentX = e.clientX - rect.left;
+            const currentY = e.clientY - rect.top;
+
+            const ctx = selectionCanvas.getContext('2d');
+            ctx.clearRect(0, 0, selectionCanvas.width, selectionCanvas.height);
+            
+            const width = currentX - startX;
+            const height = currentY - startY;
+
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(startX, startY, width, height);
+
+            selectionRect = {
+                x: Math.min(startX, currentX),
+                y: Math.min(startY, currentY),
+                width: Math.abs(width),
+                height: Math.abs(height)
+            };
+
+            if (!isPaused) {
+                calculateSpectrum();
+            }
+        }
+
+        function stopDrawing() {
+            isDrawing = false;
+            if (selectionRect && !isSpectrumActive) {
+                isSpectrumActive = true;
+                calculateSpectrum();
+            }
+        }
+function calculateSpectrum() {
+    if (!selectionRect || isPaused) return;
+
+    const ctx = spectrumCanvas.getContext('2d');
+    const videoCtx = document.createElement('canvas').getContext('2d');
+    
+    videoCtx.canvas.width = video.videoWidth;
+    videoCtx.canvas.height = video.videoHeight;
+    videoCtx.drawImage(video, 0, 0);
+
+    const imageData = videoCtx.getImageData(
+        selectionRect.x,
+        selectionRect.y,
+        selectionRect.width,
+        1
+    );
+
+    // 清除畫布
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, spectrumCanvas.width, spectrumCanvas.height);
+
+    // 計算數據和找出最大值
+    const intensities = [];
+    let maxIntensity = 0;
+    for (let i = 0; i < imageData.width; i++) {
+        const index = i * 4;
+        const r = imageData.data[index];
+        const g = imageData.data[index + 1];
+        const b = imageData.data[index + 2];
+        const intensity = (0.299 * r + 0.587 * g + 0.114 * b);
+        intensities.push(intensity);
+        maxIntensity = Math.max(maxIntensity, intensity);
+    }
+
+    // 設定邊距
+    const margin = {
+        left: 60,
+        right: 20,
+        top: 20,
+        bottom: 40
+    };
+
+    // 繪製座標軸
+    ctx.beginPath();
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 1;
+    
+    // Y軸
+    ctx.moveTo(margin.left, margin.top);
+    ctx.lineTo(margin.left, spectrumCanvas.height - margin.bottom);
+    // X軸
+    ctx.moveTo(margin.left, spectrumCanvas.height - margin.bottom);
+    ctx.lineTo(spectrumCanvas.width - margin.right, spectrumCanvas.height - margin.bottom);
+    ctx.stroke();
+
+    // 繪製刻度和標籤
+    ctx.font = '12px Arial';
+    ctx.fillStyle = 'black';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+
+    // Y軸刻度（動態計算）
+    const ySteps = 5;
+    for (let i = 0; i <= ySteps; i++) {
+        const y = margin.top + (spectrumCanvas.height - margin.top - margin.bottom) * (1 - i / ySteps);
+        const intensity = (maxIntensity * i / ySteps).toFixed(1);
+        
+        ctx.beginPath();
+        ctx.moveTo(margin.left - 5, y);
+        ctx.lineTo(margin.left, y);
+        ctx.stroke();
+        
+        ctx.fillText(intensity, margin.left - 10, y);
+    }
+
+    // X軸刻度
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const xSteps = 5;
+    for (let i = 0; i <= xSteps; i++) {
+        const x = margin.left + (spectrumCanvas.width - margin.left - margin.right) * (i / xSteps);
+        const pixel = Math.round(imageData.width * i / xSteps);
+        
+        ctx.beginPath();
+        ctx.moveTo(x, spectrumCanvas.height - margin.bottom);
+        ctx.lineTo(x, spectrumCanvas.height - margin.bottom + 5);
+        ctx.stroke();
+        
+        ctx.fillText(pixel, x, spectrumCanvas.height - margin.bottom + 10);
+    }
+
+    // 添加軸標籤
+    ctx.save();
+    ctx.translate(20, spectrumCanvas.height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText('光強度', 0, 0);
+    ctx.restore();
+
+    ctx.textAlign = 'center';
+    ctx.fillText('像素位置', spectrumCanvas.width / 2, spectrumCanvas.height - 10);
+
+    // 繪製光譜線
+    ctx.beginPath();
+    ctx.strokeStyle = 'blue';
+    ctx.lineWidth = 2;
+
+    for (let i = 0; i < intensities.length; i++) {
+        const x = margin.left + (i / intensities.length) * (spectrumCanvas.width - margin.left - margin.right);
+        const y = spectrumCanvas.height - margin.bottom - 
+                 (intensities[i] / maxIntensity) * (spectrumCanvas.height - margin.top - margin.bottom);
+
+        if (i === 0) {
+            ctx.moveTo(x, y);
+        } else {
+            ctx.lineTo(x, y);
+        }
+    }
+
+    ctx.stroke();
+
+    if (!isPaused) {
+        animationFrameId = requestAnimationFrame(calculateSpectrum);
+    }
+}
+
+        function captureScene() {
+            const combinedCanvas = document.createElement('canvas');
+            const ctx = combinedCanvas.getContext('2d');
+
+            combinedCanvas.width = Math.max(video.videoWidth, spectrumCanvas.width);
+            combinedCanvas.height = video.videoHeight + spectrumCanvas.height;
+
+            ctx.drawImage(video, 0, 0);
+            
+            if (selectionRect) {
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+            }
+
+            ctx.drawImage(spectrumCanvas, 0, video.videoHeight);
+
+            const capturedItem = document.createElement('div');
+            capturedItem.className = 'captured-item';
+            captureCount++;
+
+            const img = new Image();
+            img.src = combinedCanvas.toDataURL('image/png');
+            
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'delete-btn';
+            deleteBtn.innerHTML = 'X';
+            deleteBtn.onclick = function() {
+                capturedItem.remove();
+            };
+
+            capturedItem.appendChild(img);
+            capturedItem.appendChild(deleteBtn);
+            capturedContainer.appendChild(capturedItem);
+        }
+
+        function clearCaptures() {
+            capturedContainer.innerHTML = '';
+            captureCount = 0;
+        }
+
+        function downloadSpectrum() {
+            if (!currentIntensities) return;
+            
+            const data = `Wavelength,Intensity\nRed,${currentIntensities[0]}\nGreen,${currentIntensities[1]}\nBlue,${currentIntensities[2]}`;
+            const blob = new Blob([data], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'spectrum_data.csv';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        async function downloadAllCaptures() {
+            const captures = capturedContainer.getElementsByTagName('img');
+            if (captures.length === 0) {
+                alert('沒有可下載的擷取畫面');
+                return;
+            }
+
+            const zip = new JSZip();
+            const now = new Date();
+            const timestamp = now.getFullYear() +
+                            ('0' + (now.getMonth() + 1)).slice(-2) +
+                            ('0' + now.getDate()).slice(-2) + '_' +
+                            ('0' + now.getHours()).slice(-2) +
+                            ('0' + now.getMinutes()).slice(-2) +
+                            ('0' + now.getSeconds()).slice(-2);
+
+            Array.from(captures).forEach((img, index) => {
+                const imageData = img.src.split(',')[1];
+                zip.file(`capture_${timestamp}_${index + 1}.png`, imageData, {base64: true});
+            });
+
+            const content = await zip.generateAsync({type: 'blob'});
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(content);
+            link.download = `captures_${timestamp}.zip`;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+
+        function toggleSpectrum() {
+            isPaused = !isPaused;
+            pauseButton.textContent = isPaused ? '繼續光譜' : '暫停光譜';
+            downloadButton.disabled = !isPaused;
+            captureButton.disabled = !isPaused;
+            
+            if (!isPaused && isSpectrumActive) {
+                calculateSpectrum();
+            }
+        }
+
+        async function startCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+
+            const [width, height] = resolutionSelect.value.split('x').map(Number);
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: width },
+                        height: { ideal: height }
+                    }
+                });
+                video.srcObject = stream;
+                
+                video.onloadedmetadata = () => {
+                    setupCanvases();
+                    const videoContainer = document.querySelector('.video-container');
+                    videoContainer.addEventListener('mousedown', startDrawing);
+                    videoContainer.addEventListener('mousemove', draw);
+                    videoContainer.addEventListener('mouseup', stopDrawing);
+                    videoContainer.addEventListener('mouseleave', stopDrawing);
+                };
+                
+            } catch (err) {
+                console.error('無法存取攝影機:', err);
+                alert('無法存取攝影機，請確認權限設定');
+            }
+        }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+</body>
+</html>
